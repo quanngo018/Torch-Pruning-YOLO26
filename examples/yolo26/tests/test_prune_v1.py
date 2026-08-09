@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch_pruning as tp
+import types
 
 from ultralytics import YOLO
 from ultralytics.nn.modules import Detect, C2f, Conv, Bottleneck
@@ -86,6 +87,27 @@ def replace_c2f_with_c2f_v2(module):
             setattr(module, name, c2f_v2)
         else:
             replace_c2f_with_c2f_v2(child_module)
+
+
+def detect_forward_for_pruning(self, x):
+    """Run both Detect branches without detach while tracing pruning dependencies."""
+    preds = self.forward_head(x, **self.one2many)
+
+    if self.end2end:
+        one2one = self.forward_head(x, **self.one2one)
+        preds = {
+            "one2many": preds,
+            "one2one": one2one,
+        }
+
+    if self.training:
+        return preds
+
+    y = self._inference(preds["one2one"] if self.end2end else preds)
+    if self.end2end:
+        y = self.postprocess(y.permute(0, 2, 1))
+    return y if self.export else (y, preds)
+
 
 yolo = YOLO(MODEL_PATH)
 model = yolo.model
@@ -264,17 +286,31 @@ class DebugImportance:
 
 importance = DebugImportance(model)
 
-pruner = tp.pruner.MagnitudePruner(
-    model=model,
-    example_inputs=dummy_input,
-    importance=importance,
+original_detect_forwards = {}
 
-    pruning_ratio=0.1,
-    iterative_steps=1,
+for detect_module in model.modules():
+    if isinstance(detect_module, Detect):
+        original_detect_forwards[detect_module] = detect_module.forward
+        detect_module.forward = types.MethodType(
+            detect_forward_for_pruning,
+            detect_module,
+        )
 
-    ignored_layers=ignored_layers,
-    root_module_types=[nn.Conv2d],
-)
+try:
+    pruner = tp.pruner.MagnitudePruner(
+        model=model,
+        example_inputs=dummy_input,
+        importance=importance,
+
+        pruning_ratio=0.1,
+        iterative_steps=1,
+
+        ignored_layers=ignored_layers,
+        root_module_types=[nn.Conv2d],
+    )
+finally:
+    for detect_module, original_forward in original_detect_forwards.items():
+        detect_module.forward = original_forward
 
 
 # ============================================================
