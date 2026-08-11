@@ -412,7 +412,7 @@ def evaluate_case(
             save_dir.mkdir(parents=True, exist_ok=True)
             save_path = save_dir / f"{experiment}_{name}.pt"
             ckpt = {
-                "model": deepcopy(model).half(),
+                "model": deepcopy(model).float(),
                 "experiment": experiment,
                 "name": name,
                 "pruning_ratio": pruning_ratio,
